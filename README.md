@@ -4,8 +4,9 @@ A small, always-on-top todo panel for Wayland compositors such as
 [Niri](https://github.com/YaLTeR/niri), written in Rust with GTK4 and
 `gtk4-layer-shell`. It pairs with [waybar](https://github.com/Alexays/Waybar) by
 printing today's unfinished item counts.
+The style is inspired by [waycal](https://github.com/ForrestKnight/waycal).
 
-![style reference](docs/sample.png)
+![demo](docs/demo.png)
 
 ## Features
 

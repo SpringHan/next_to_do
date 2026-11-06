@@ -50,7 +50,7 @@ next_to_do help     # 查看用法与文件位置
 | `space`    | 切换选中项的完成状态                  |
 | `a`        | 新增 `order-bounded` 事项             |
 | `e`        | 重命名选中项                          |
-| `t`        | 设置 deadline（转为 `time-bounded`）  |
+| `t`        | 打开 deadline 日历（转为 `time-bounded`） |
 | `o`        | 取消 deadline（转回 `order-bounded`） |
 | `d`        | 删除选中项                            |
 | `Ctrl+j`   | 将选中项下移                          |
@@ -59,8 +59,26 @@ next_to_do help     # 查看用法与文件位置
 | `Escape`   | 隐藏面板                              |
 | `q`        | 退出                                  |
 
-点击某一行可选中它，点击行首的 `○` 可标记完成。deadline 的输入格式为
-`YYYY-MM-DD HH:MM`、`YYYY-MM-DD HH:MM:SS` 或 `YYYY-MM-DD`（表示当天 23:59）。
+点击某一行可选中它，点击行首的 `○` 可标记完成。
+
+### deadline 日历
+
+按 `t` 会为选中项打开一个日历，列表区域会被月历取代，被高亮的那一天就是最终保存的日期。
+
+| 按键              | 功能                                 |
+| ----------------- | ------------------------------------ |
+| `h` / `←`         | 前一天                               |
+| `l` / `→`         | 后一天                               |
+| `k` / `↑`         | 上一周                               |
+| `j` / `↓`         | 下一周                               |
+| `[` / `Page_Up`   | 上一个月（日期存在时保持同一天）     |
+| `]` / `Page_Down` | 下一个月                             |
+| `t`               | 回到今天                             |
+| `Tab`             | 改为编辑时间（`HH:MM`）              |
+| `Enter`           | 保存日期与时间                       |
+| `Escape`          | 取消                                 |
+
+日历中的日期也可以直接点击，鼠标能做到的事都有对应的按键。
 
 以上按键都可以在 `~/.config/next_to_do/config.json` 中修改，例如：
 
@@ -69,7 +87,9 @@ next_to_do help     # 查看用法与文件位置
   "keys": {
     "move_down": "j,Down,n",
     "toggle_done": "space,Enter",
-    "quit": "q,Ctrl+q"
+    "quit": "q,Ctrl+q",
+    "cal_next_month": "],Page_Down,n",
+    "cal_confirm": "Return,Enter"
   }
 }
 ```

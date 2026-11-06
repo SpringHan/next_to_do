@@ -22,6 +22,16 @@ pub enum Action {
     MoveItemUp,
     MoveItemDown,
     Reload,
+    CalLeft,
+    CalRight,
+    CalUp,
+    CalDown,
+    CalPrevMonth,
+    CalNextMonth,
+    CalToday,
+    CalTime,
+    CalConfirm,
+    CalCancel,
 }
 
 impl Action {
@@ -39,6 +49,16 @@ impl Action {
         Action::MoveItemUp,
         Action::MoveItemDown,
         Action::Reload,
+        Action::CalLeft,
+        Action::CalRight,
+        Action::CalUp,
+        Action::CalDown,
+        Action::CalPrevMonth,
+        Action::CalNextMonth,
+        Action::CalToday,
+        Action::CalTime,
+        Action::CalConfirm,
+        Action::CalCancel,
     ];
 
     pub fn name(self) -> &'static str {
@@ -56,7 +76,34 @@ impl Action {
             Action::MoveItemUp => "move_item_up",
             Action::MoveItemDown => "move_item_down",
             Action::Reload => "reload",
+            Action::CalLeft => "cal_left",
+            Action::CalRight => "cal_right",
+            Action::CalUp => "cal_up",
+            Action::CalDown => "cal_down",
+            Action::CalPrevMonth => "cal_prev_month",
+            Action::CalNextMonth => "cal_next_month",
+            Action::CalToday => "cal_today",
+            Action::CalTime => "cal_time",
+            Action::CalConfirm => "cal_confirm",
+            Action::CalCancel => "cal_cancel",
         }
+    }
+
+    /// True for the actions that only apply while the deadline calendar is open.
+    pub fn is_calendar(self) -> bool {
+        matches!(
+            self,
+            Action::CalLeft
+                | Action::CalRight
+                | Action::CalUp
+                | Action::CalDown
+                | Action::CalPrevMonth
+                | Action::CalNextMonth
+                | Action::CalToday
+                | Action::CalTime
+                | Action::CalConfirm
+                | Action::CalCancel
+        )
     }
 }
 
@@ -77,6 +124,16 @@ const DEFAULT_KEYS: &[(&str, &str)] = &[
     ("move_item_up", "ctrl+k"),
     ("move_item_down", "ctrl+j"),
     ("reload", "ctrl+r"),
+    ("cal_left", "h,Left"),
+    ("cal_right", "l,Right"),
+    ("cal_up", "k,Up"),
+    ("cal_down", "j,Down"),
+    ("cal_prev_month", "[,Page_Up"),
+    ("cal_next_month", "],Page_Down"),
+    ("cal_today", "t"),
+    ("cal_time", "Tab"),
+    ("cal_confirm", "Return,KP_Enter"),
+    ("cal_cancel", "Escape"),
 ];
 
 /// `~/.config/next_to_do`, honouring `$XDG_CONFIG_HOME`.
@@ -167,8 +224,30 @@ impl Config {
 #[derive(Debug, Clone, Copy)]
 pub struct Binding {
     pub action: Action,
-    key: gdk::Key,
+    key: KeySpec,
     modifiers: gdk::ModifierType,
+}
+
+/// A key symbol: a named GDK key or a single printable character.
+///
+/// `gdk_keyval_from_name` only knows keysym names (`Return`, `bracketleft`,
+/// `space`, ...), so punctuation such as `[` has to be kept as a character and
+/// compared through `to_unicode` instead.
+#[derive(Debug, Clone, Copy)]
+enum KeySpec {
+    Key(gdk::Key),
+    Char(char),
+}
+
+impl KeySpec {
+    fn matches(self, key: gdk::Key) -> bool {
+        match self {
+            KeySpec::Key(expected) => expected == key.to_lower(),
+            KeySpec::Char(expected) => {
+                key.to_unicode().map(|ch| ch.to_ascii_lowercase()) == Some(expected)
+            }
+        }
+    }
 }
 
 impl Binding {
@@ -177,11 +256,11 @@ impl Binding {
         let mask = gdk::ModifierType::CONTROL_MASK
             | gdk::ModifierType::ALT_MASK
             | gdk::ModifierType::SUPER_MASK;
-        self.key == key.to_lower() && (state & mask) == self.modifiers
+        self.key.matches(key) && (state & mask) == self.modifiers
     }
 }
 
-/// Parse specs such as `j`, `Up`, `space` or `ctrl+k`.
+/// Parse specs such as `j`, `Up`, `space`, `[` or `ctrl+k`.
 fn parse_binding(action: Action, spec: &str) -> Option<Binding> {
     let mut parts: Vec<&str> = spec.split('+').map(str::trim).collect();
     let key_name = parts.pop()?;
@@ -197,10 +276,25 @@ fn parse_binding(action: Action, spec: &str) -> Option<Binding> {
             _ => return None,
         };
     }
-    let key = gdk::Key::from_name(key_name)?;
+    // Friendly aliases for the names users reach for first.
+    let key_name = match key_name.to_ascii_lowercase().as_str() {
+        "enter" => "Return",
+        "esc" => "Escape",
+        _ => key_name,
+    };
+    let key = match gdk::Key::from_name(key_name) {
+        Some(key) => KeySpec::Key(key.to_lower()),
+        None => {
+            let mut chars = key_name.chars();
+            match (chars.next(), chars.next()) {
+                (Some(ch), None) => KeySpec::Char(ch.to_ascii_lowercase()),
+                _ => return None,
+            }
+        }
+    };
     Some(Binding {
         action,
-        key: key.to_lower(),
+        key,
         modifiers,
     })
 }

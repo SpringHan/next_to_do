@@ -52,7 +52,7 @@ The panel is created once and kept alive; running `next_to_do` again toggles it.
 | `space`    | toggle selected item done / not done           |
 | `a`        | add an order-bounded item                      |
 | `e`        | rename the selected item                       |
-| `t`        | set the deadline (turns it into time-bounded)  |
+| `t`        | open the deadline calendar (time-bounded)      |
 | `o`        | drop the deadline (back to order-bounded)      |
 | `d`        | delete the selected item                       |
 | `Ctrl+j`   | move the selected item down                    |
@@ -61,8 +61,27 @@ The panel is created once and kept alive; running `next_to_do` again toggles it.
 | `Escape`   | hide the panel                                 |
 | `q`        | quit                                           |
 
-Clicking a row selects it, clicking its `○` marks it done. Deadlines are typed as
-`YYYY-MM-DD HH:MM`, `YYYY-MM-DD HH:MM:SS` or `YYYY-MM-DD` (meaning 23:59).
+Clicking a row selects it, clicking its `○` marks it done.
+
+### Deadline calendar
+
+`t` opens a month calendar for the selected item; the list is replaced by the
+grid and the highlighted day is what gets saved.
+
+| Key               | Action                                   |
+| ----------------- | ---------------------------------------- |
+| `h` / `←`         | previous day                             |
+| `l` / `→`         | next day                                 |
+| `k` / `↑`         | previous week                            |
+| `j` / `↓`         | next week                                |
+| `[` / `Page_Up`   | previous month (same day when it exists) |
+| `]` / `Page_Down` | next month                               |
+| `t`               | jump to today                            |
+| `Tab`             | edit the time (`HH:MM`) instead          |
+| `Enter`           | save the day and time                    |
+| `Escape`          | cancel                                   |
+
+Days can be clicked as well: on the calendar every mouse action has a key.
 
 All of these keys can be changed in `~/.config/next_to_do/config.json`, e.g.
 
@@ -71,7 +90,9 @@ All of these keys can be changed in `~/.config/next_to_do/config.json`, e.g.
   "keys": {
     "move_down": "j,Down,n",
     "toggle_done": "space,Enter",
-    "quit": "q,Ctrl+q"
+    "quit": "q,Ctrl+q",
+    "cal_next_month": "],Page_Down,n",
+    "cal_confirm": "Return,Enter"
   }
 }
 ```

@@ -123,7 +123,17 @@ the reload key afterwards):
     "make_order": "o",
     "move_item_up": "ctrl+k",
     "move_item_down": "ctrl+j",
-    "reload": "ctrl+r"
+    "reload": "ctrl+r",
+    "cal_left": "h,Left",
+    "cal_right": "l,Right",
+    "cal_up": "k,Up",
+    "cal_down": "j,Down",
+    "cal_prev_month": "[,Page_Up",
+    "cal_next_month": "],Page_Down",
+    "cal_today": "t",
+    "cal_time": "Tab",
+    "cal_confirm": "Return,KP_Enter",
+    "cal_cancel": "Escape"
   }
 }
 ```
@@ -137,12 +147,22 @@ existing file.
 Every action is described by `config::Action` and has a default. A value is a
 comma separated list of alternative keys (`"j,Down"`). A key spec is
 `[modifier+]*key`, where the modifiers are `ctrl`, `alt` and `super`, and the key
-is any name understood by `gdk_keyval_from_name` (`j`, `space`, `Up`, `Escape`,
-`F1`, ...).
+is either a keysym name understood by `gdk_keyval_from_name` (`j`, `space`, `Up`,
+`Escape`, `bracketleft`, `F1`, ...) or a single printable character (`[`, `]`,
+`;`). `Enter` is accepted as an alias for `Return` and `Esc` for `Escape`;
+`KP_Enter` is the numeric keypad key.
+
+The parser keeps a single character as a character and matches it through
+`gdk_keyval_to_unicode`, because punctuation keysyms have no name of their own
+(`[` is just the keysym `0x5b`, named `bracketleft`).
 
 Matching (`Binding::matches`) compares the lower-cased key symbol and only the
 `ctrl`/`alt`/`super` bits, so `Shift` and `Caps Lock` do not change a binding and
 `k` matches both `k` and `K`.
+
+Normal and calendar bindings live in the same `keys` map; the active mode decides
+which subset is consulted (`Action::is_calendar`). `j`/`k` are therefore bound to
+both "select next/previous item" and "next/previous week" without clashing.
 
 ## GUI
 
@@ -166,39 +186,70 @@ Widget tree:
 Window (transparent, class `next-to-do`)
 └── Box.panel (dark rounded background, 420px wide)
     ├── Box.header   "TODAY" + date
-    ├── ScrolledWindow (max content height 460)
-    │   └── Box.rows  one Box.row per item: check button, title, meta
-    ├── Box.input-bar (hidden unless editing): ">" + Entry
-    ├── Label.status  inline error, e.g. a malformed deadline
+    ├── ScrolledWindow (max content height 460)   ┐ exactly one of the two is
+    │   └── Box.rows  one Box.row per item        │ visible: the item list
+    ├── Box.calendar                              │ normally, the calendar while
+    │   ├── Label.calendar-item  edited item      │ a deadline is being edited
+    │   ├── Label.month          "November 2026"  │
+    │   ├── Box                  Mo .. Su         │
+    │   ├── Box                  6 rows of 7      │
+    │   │   └── Button.day        one per day     │
+    │   └── Label.hint           calendar legend  ┘
+    ├── Box.input-bar (hidden unless editing): ">" + Entry (title or HH:MM)
+    ├── Label.status  inline error, e.g. a malformed time
     └── Box.footer    open/total counter + key legend
 ```
 
 The theme is a single CSS string installed for the default display at
 `STYLE_PROVIDER_PRIORITY_APPLICATION`: near-black panel (`rgba(20,20,20,0.97)`),
 22px rounded corners, mint green accent (`#a6e3a1`), white titles and grey
-metadata, monospace font, matching `docs/sample.png`.
+metadata, monospace font, matching `docs/sample.png`. The calendar follows the
+same palette: green weekday row, dimmed days of the neighbouring months, and the
+highlighted day drawn as a green rounded square with dark text.
 
 ## Interaction
 
-There are two modes:
+There are three modes:
 
-* **normal** — keys are matched against the bindings; the selected row is
+* **normal** — keys are matched against the normal bindings; the selected row is
   highlighted.
-* **input** — the entry line is open for a new title, a rename or a deadline
-  (`YYYY-MM-DD HH:MM`, `YYYY-MM-DD HH:MM:SS` or `YYYY-MM-DD`, the latter meaning
-  23:59). `Enter` submits, `Escape` cancels. While the entry is open every key
-  except `Escape` is forwarded to it.
+* **calendar** — opened with the deadline key. The item list is replaced by a
+  month grid for the selected item. The highlighted day is the state; the shown
+  month always follows it, so moving the highlight across a month boundary also
+  scrolls the grid.
+* **text** — the entry line is open for a new title, a rename, or the `HH:MM`
+  time of the highlighted calendar day. `Enter` submits, `Escape` cancels. While
+  the entry is open every key except `Escape` is forwarded to it.
+
+The calendar keys (all configurable under `cal_*`):
+
+| Key               | Action                                   |
+| ----------------- | ---------------------------------------- |
+| `h` / `←`         | previous day                             |
+| `l` / `→`         | next day                                 |
+| `k` / `↑`         | previous week                            |
+| `j` / `↓`         | next week                                |
+| `[` / `Page_Up`   | previous month (same day when it exists) |
+| `]` / `Page_Down` | next month                               |
+| `t`               | jump to today                            |
+| `Tab`             | move the keyboard to the `HH:MM` entry   |
+| `Enter`           | save                                     |
+| `Escape`          | cancel                                   |
+
+The `HH:MM` entry starts with the item's current deadline time, or with `23:59`
+for an item that has no deadline yet.
 
 Mouse and keyboard are equivalent:
 
-| Mouse                          | Key                       |
-| ------------------------------ | ------------------------- |
-| click a row                    | `j`/`k`, `Down`/`Up`      |
-| click the check button         | `space`                   |
+| Mouse                  | Key                       |
+| ---------------------- | ------------------------- |
+| click a row            | `j`/`k`, `Down`/`Up`      |
+| click the check button | `space`                   |
+| click a calendar day   | `h`/`j`/`k`/`l`, arrows   |
 
 The key controller is attached to the window in the *capture* phase, so it sees
-events before the focused widget and can decide whether the entry belongs to the
-input mode or not.
+events before the focused widget and decides which mode owns the key. `Escape`
+still cancels while the calendar is open even if `cal_cancel` was unbound.
 
 Setting a deadline turns the item into a time-bounded one; `make_order` turns it
 back and appends it at the end of the order-bounded chain.

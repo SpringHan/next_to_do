@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone};
+use chrono::{DateTime, Datelike, Days, Local, NaiveDate, TimeZone, Timelike};
 use gtk4 as gtk;
 
 use gtk4::gio::prelude::{ApplicationExt as _, ApplicationExtManual as _};
@@ -151,14 +151,75 @@ window.next-to-do {
     color: #6f6f6f;
     font-size: 11px;
 }
+
+.calendar {
+    margin-top: 4px;
+}
+
+.calendar-item {
+    color: #8a8a8a;
+    font-size: 12px;
+}
+
+.month {
+    color: #ffffff;
+    font-size: 15px;
+    font-weight: 700;
+    margin-top: 2px;
+    margin-bottom: 6px;
+}
+
+.weekday {
+    color: #a6e3a1;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 4px 0;
+}
+
+.day {
+    background-color: transparent;
+    background-image: none;
+    border: none;
+    box-shadow: none;
+    padding: 2px 0;
+    min-height: 28px;
+    border-radius: 8px;
+    color: #eaeaea;
+    font-size: 13px;
+}
+
+.day:hover {
+    background-color: rgba(255, 255, 255, 0.06);
+}
+
+.day.other {
+    color: #5a5a5a;
+}
+
+.day.today {
+    color: #a6e3a1;
+    font-weight: 700;
+}
+
+.day.selected {
+    background-color: #a6e3a1;
+    color: #141414;
+    font-weight: 700;
+}
 "#;
 
-/// What the entry line is currently editing.
+/// What the entry line or the calendar is currently editing.
 #[derive(Debug, Clone, Copy)]
 enum Editing {
     NewItem,
     Title(u64),
-    Deadline(u64),
+    Deadline {
+        id: u64,
+        /// Highlighted day of the calendar.
+        cursor: NaiveDate,
+        /// True while the `HH:MM` entry owns the keyboard.
+        time_focus: bool,
+    },
 }
 
 impl Editing {
@@ -166,7 +227,7 @@ impl Editing {
         match self {
             Editing::NewItem => "new item, Enter to save, Escape to cancel",
             Editing::Title(_) => "new title, Enter to save, Escape to cancel",
-            Editing::Deadline(_) => "deadline `YYYY-MM-DD HH:MM`, Enter to save",
+            Editing::Deadline { .. } => "time `HH:MM`, Tab to go back to the calendar",
         }
     }
 }
@@ -188,6 +249,11 @@ impl App {
 struct Ui {
     window: gtk::Window,
     rows: gtk::Box,
+    scroller: gtk::ScrolledWindow,
+    calendar: gtk::Box,
+    calendar_item: gtk::Label,
+    month_label: gtk::Label,
+    calendar_days: gtk::Box,
     header_date: gtk::Label,
     footer_count: gtk::Label,
     input_bar: gtk::Box,
@@ -304,6 +370,34 @@ fn build_ui(application: &gtk::Application, config: &config::Config) -> Ui {
     scroller.set_max_content_height(460);
     scroller.set_child(Some(&rows));
 
+    let calendar = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    calendar.add_css_class("calendar");
+    calendar.set_visible(false);
+    let calendar_item = gtk::Label::new(None);
+    calendar_item.add_css_class("calendar-item");
+    calendar_item.set_max_width_chars(46);
+    calendar_item.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    let month_label = gtk::Label::new(None);
+    month_label.add_css_class("month");
+    let weekdays = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    weekdays.set_homogeneous(true);
+    for name in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"] {
+        let weekday = gtk::Label::new(Some(name));
+        weekday.add_css_class("weekday");
+        weekdays.append(&weekday);
+    }
+    let calendar_days = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let calendar_hint = gtk::Label::new(Some(hint_text(config, CALENDAR_HINTS).as_str()));
+    calendar_hint.add_css_class("hint");
+    calendar_hint.set_wrap(true);
+    calendar_hint.set_max_width_chars(46);
+    calendar_hint.set_justify(gtk::Justification::Center);
+    calendar.append(&calendar_item);
+    calendar.append(&month_label);
+    calendar.append(&weekdays);
+    calendar.append(&calendar_days);
+    calendar.append(&calendar_hint);
+
     let input_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     input_bar.add_css_class("input-bar");
     let prompt = gtk::Label::new(Some(">"));
@@ -326,14 +420,18 @@ fn build_ui(application: &gtk::Application, config: &config::Config) -> Ui {
     footer_count.add_css_class("count");
     footer_count.set_xalign(0.0);
     footer_count.set_hexpand(true);
-    let hint = gtk::Label::new(Some(hint_text(config).as_str()));
+    let hint = gtk::Label::new(Some(hint_text(config, MAIN_HINTS).as_str()));
     hint.add_css_class("hint");
     hint.set_xalign(1.0);
+    hint.set_wrap(true);
+    hint.set_max_width_chars(52);
+    hint.set_justify(gtk::Justification::Right);
     footer.append(&footer_count);
     footer.append(&hint);
 
     panel.append(&header);
     panel.append(&scroller);
+    panel.append(&calendar);
     panel.append(&input_bar);
     panel.append(&status);
     panel.append(&footer);
@@ -342,6 +440,11 @@ fn build_ui(application: &gtk::Application, config: &config::Config) -> Ui {
     Ui {
         window,
         rows,
+        scroller,
+        calendar,
+        calendar_item,
+        month_label,
+        calendar_days,
         header_date,
         footer_count,
         input_bar,
@@ -350,18 +453,29 @@ fn build_ui(application: &gtk::Application, config: &config::Config) -> Ui {
     }
 }
 
-/// Footer legend built from the configured keys.
-fn hint_text(config: &config::Config) -> String {
-    const HINTS: &[(&str, Action)] = &[
-        ("move", Action::MoveDown),
-        ("toggle", Action::ToggleDone),
-        ("add", Action::Add),
-        ("edit", Action::EditTitle),
-        ("time", Action::SetDeadline),
-        ("delete", Action::Delete),
-        ("quit", Action::Quit),
-    ];
-    HINTS
+const MAIN_HINTS: &[(&str, Action)] = &[
+    ("move", Action::MoveDown),
+    ("toggle", Action::ToggleDone),
+    ("add", Action::Add),
+    ("edit", Action::EditTitle),
+    ("time", Action::SetDeadline),
+    ("delete", Action::Delete),
+    ("quit", Action::Quit),
+];
+
+const CALENDAR_HINTS: &[(&str, Action)] = &[
+    ("day", Action::CalRight),
+    ("week", Action::CalDown),
+    ("month", Action::CalNextMonth),
+    ("today", Action::CalToday),
+    ("time", Action::CalTime),
+    ("save", Action::CalConfirm),
+    ("cancel", Action::CalCancel),
+];
+
+/// Legend built from the configured keys of `hints`.
+fn hint_text(config: &config::Config, hints: &[(&str, Action)]) -> String {
+    hints
         .iter()
         .map(|(label, action)| {
             let key = config
@@ -388,17 +502,18 @@ fn install_css() {
     }
 }
 
-/// Rebuild the whole list and the labels from the current state.
+/// Rebuild the whole list, the calendar and the labels from the current state.
 fn refresh(app: &Rc<RefCell<App>>, ui: &Rc<Ui>) {
     let today = Local::now().date_naive();
 
-    let (rows, footer, date, editing, status) = {
+    let (rows, footer, date, editing, status, calendar_title) = {
         let mut app = app.borrow_mut();
         let order = app.data.ordered(today);
         if app.selected.map_or(true, |id| !order.contains(&id)) {
             app.selected = order.first().copied();
         }
         let selected = app.selected;
+        let editing = app.editing;
 
         // A plain loop: closures returning references into the borrowed state
         // would not compile.
@@ -423,7 +538,18 @@ fn refresh(app: &Rc<RefCell<App>>, ui: &Rc<Ui>) {
             order.len()
         );
         let date = Local::now().format("%a %d %b").to_string().to_uppercase();
-        (rows, footer, date, app.editing, app.status.clone())
+        let calendar_title = match editing {
+            Some(Editing::Deadline { id, .. }) => app.data.get(id).map(|item| item.title.clone()),
+            _ => None,
+        };
+        (
+            rows,
+            footer,
+            date,
+            editing,
+            app.status.clone(),
+            calendar_title,
+        )
     };
 
     while let Some(child) = ui.rows.first_child() {
@@ -441,6 +567,16 @@ fn refresh(app: &Rc<RefCell<App>>, ui: &Rc<Ui>) {
         }
     }
 
+    let calendar_open = matches!(editing, Some(Editing::Deadline { .. }));
+    ui.scroller.set_visible(!calendar_open);
+    ui.calendar.set_visible(calendar_open);
+    if let Some(Editing::Deadline { cursor, .. }) = editing {
+        ui.calendar_item
+            .set_text(calendar_title.as_deref().unwrap_or_default());
+        ui.month_label.set_text(&cursor.format("%B %Y").to_string());
+        build_calendar_days(app, ui, cursor, today);
+    }
+
     ui.header_date.set_text(&date);
     ui.footer_count.set_text(&footer);
     ui.status.set_text(status.as_deref().unwrap_or_default());
@@ -449,9 +585,67 @@ fn refresh(app: &Rc<RefCell<App>>, ui: &Rc<Ui>) {
     match editing {
         Some(editing) => {
             ui.entry.set_placeholder_text(Some(editing.placeholder()));
-            ui.entry.grab_focus();
+            if !matches!(editing, Editing::Deadline { time_focus: false, .. }) {
+                ui.entry.grab_focus();
+            }
         }
         None => ui.entry.set_text(""),
+    }
+}
+
+/// First day of the month `date` belongs to.
+fn month_start(date: NaiveDate) -> NaiveDate {
+    NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap_or(date)
+}
+
+/// Fill the calendar grid with six weeks starting on the Monday of the week of
+/// the first day of the month.
+fn build_calendar_days(
+    app: &Rc<RefCell<App>>,
+    ui: &Rc<Ui>,
+    cursor: NaiveDate,
+    today: NaiveDate,
+) {
+    while let Some(child) = ui.calendar_days.first_child() {
+        ui.calendar_days.remove(&child);
+    }
+
+    let month = month_start(cursor);
+    let offset = month.weekday().num_days_from_monday() as u64;
+    let start = month.checked_sub_days(Days::new(offset)).unwrap_or(month);
+
+    for week in 0..6u64 {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        row.set_homogeneous(true);
+        for weekday in 0..7u64 {
+            let date = start
+                .checked_add_days(Days::new(week * 7 + weekday))
+                .unwrap_or(start);
+            let button = gtk::Button::with_label(&date.day().to_string());
+            button.add_css_class("day");
+            if date.month() != cursor.month() {
+                button.add_css_class("other");
+            }
+            if date == today {
+                button.add_css_class("today");
+            }
+            if date == cursor {
+                button.add_css_class("selected");
+            }
+            let (app, ui) = (app.clone(), ui.clone());
+            button.connect_clicked(move |_| {
+                if let Some(Editing::Deadline {
+                    cursor, time_focus, ..
+                }) = app.borrow_mut().editing.as_mut()
+                {
+                    *cursor = date;
+                    *time_focus = false;
+                }
+                defer_refresh(&app, &ui);
+            });
+            row.append(&button);
+        }
+        ui.calendar_days.append(&row);
     }
 }
 
@@ -491,6 +685,7 @@ fn make_row(app: &Rc<RefCell<App>>, ui: &Rc<Ui>, row: Row) -> gtk::Box {
     title.set_xalign(0.0);
     title.set_hexpand(true);
     title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    title.set_max_width_chars(40);
 
     let meta = gtk::Label::new(Some(row.meta.as_str()));
     meta.add_css_class("meta");
@@ -530,16 +725,26 @@ fn meta_text(deadline: Option<&DateTime<Local>>, today: NaiveDate) -> String {
     }
 }
 
-fn parse_deadline(text: &str) -> Option<DateTime<Local>> {
-    let text = text.trim();
-    let naive = NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M")
-        .or_else(|_| NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S"))
-        .or_else(|_| {
-            NaiveDate::parse_from_str(text, "%Y-%m-%d")
-                .map(|date| date.and_hms_opt(23, 59, 0).expect("23:59 is a valid time"))
-        })
-        .ok()?;
-    Local.from_local_datetime(&naive).single()
+/// Parse the `HH:MM` time typed into the deadline entry.
+fn parse_time(text: &str) -> Option<(u32, u32)> {
+    let (hour, minute) = text.trim().split_once(':')?;
+    let hour: u32 = hour.trim().parse().ok()?;
+    let minute: u32 = minute.trim().parse().ok()?;
+    (hour < 24 && minute < 60).then_some((hour, minute))
+}
+
+/// First binding of the requested mode (normal or calendar) that matches `key`.
+fn find_action(
+    app: &Rc<RefCell<App>>,
+    key: gtk::gdk::Key,
+    state: gtk::gdk::ModifierType,
+    calendar: bool,
+) -> Option<Action> {
+    let app = app.borrow();
+    app.bindings
+        .iter()
+        .find(|binding| binding.action.is_calendar() == calendar && binding.matches(key, state))
+        .map(|binding| binding.action)
 }
 
 fn on_key(
@@ -548,29 +753,98 @@ fn on_key(
     key: gtk::gdk::Key,
     state: gtk::gdk::ModifierType,
 ) -> gtk::glib::Propagation {
-    // While the entry is open every key except Escape belongs to it.
-    if app.borrow().editing.is_some() {
+    let editing = app.borrow().editing;
+
+    // The calendar owns every key while it is open.
+    if matches!(editing, Some(Editing::Deadline { time_focus: false, .. })) {
+        match find_action(app, key, state, true) {
+            Some(action) => calendar_action(app, ui, action),
+            None if key == gtk::gdk::Key::Escape => cancel_edit(app, ui),
+            None => {}
+        }
+        return gtk::glib::Propagation::Stop;
+    }
+
+    // Text entry: Escape cancels, the time key hands the keyboard back.
+    if editing.is_some() {
         if key == gtk::gdk::Key::Escape {
             cancel_edit(app, ui);
+            return gtk::glib::Propagation::Stop;
+        }
+        if matches!(editing, Some(Editing::Deadline { time_focus: true, .. }))
+            && find_action(app, key, state, true) == Some(Action::CalTime)
+        {
+            if let Some(Editing::Deadline { time_focus, .. }) = app.borrow_mut().editing.as_mut() {
+                *time_focus = false;
+            }
+            refresh(app, ui);
             return gtk::glib::Propagation::Stop;
         }
         return gtk::glib::Propagation::Proceed;
     }
 
-    let action = {
-        let app = app.borrow();
-        app.bindings
-            .iter()
-            .find(|binding| binding.matches(key, state))
-            .map(|binding| binding.action)
-    };
-    match action {
+    match find_action(app, key, state, false) {
         Some(action) => {
             run_action(app, ui, action);
             gtk::glib::Propagation::Stop
         }
         None => gtk::glib::Propagation::Proceed,
     }
+}
+
+/// Apply a key press while the deadline calendar is focused.
+fn calendar_action(app: &Rc<RefCell<App>>, ui: &Rc<Ui>, action: Action) {
+    if action == Action::CalCancel {
+        cancel_edit(app, ui);
+        return;
+    }
+    if action == Action::CalConfirm {
+        let text = ui.entry.text().to_string();
+        submit(app, ui, &text);
+        return;
+    }
+
+    let today = Local::now().date_naive();
+    {
+        let mut app = app.borrow_mut();
+        let Some(Editing::Deadline {
+            cursor, time_focus, ..
+        }) = app.editing.as_mut()
+        else {
+            return;
+        };
+        *time_focus = action == Action::CalTime;
+        match action {
+            Action::CalLeft | Action::CalRight | Action::CalUp | Action::CalDown => {
+                let days: i64 = match action {
+                    Action::CalLeft => -1,
+                    Action::CalRight => 1,
+                    Action::CalUp => -7,
+                    _ => 7,
+                };
+                *cursor = if days < 0 {
+                    cursor
+                        .checked_sub_days(Days::new((-days) as u64))
+                        .unwrap_or(*cursor)
+                } else {
+                    cursor
+                        .checked_add_days(Days::new(days as u64))
+                        .unwrap_or(*cursor)
+                };
+            }
+            Action::CalPrevMonth | Action::CalNextMonth => {
+                let step = if action == Action::CalPrevMonth { -1 } else { 1 };
+                let index = cursor.year() * 12 + cursor.month0() as i32 + step;
+                let year = index.div_euclid(12);
+                let month = index.rem_euclid(12) as u32 + 1;
+                let first = NaiveDate::from_ymd_opt(year, month, 1).unwrap_or(*cursor);
+                *cursor = NaiveDate::from_ymd_opt(year, month, cursor.day()).unwrap_or(first);
+            }
+            Action::CalToday => *cursor = today,
+            _ => {}
+        }
+    }
+    refresh(app, ui);
 }
 
 fn run_action(app: &Rc<RefCell<App>>, ui: &Rc<Ui>, action: Action) {
@@ -605,16 +879,25 @@ fn run_action(app: &Rc<RefCell<App>>, ui: &Rc<Ui>, action: Action) {
         Action::SetDeadline => {
             let selected = app.borrow().selected;
             if let Some(id) = selected {
-                let prefill = app
-                    .borrow()
-                    .data
-                    .get(id)
-                    .and_then(|item| item.deadline.as_ref())
-                    .map(|deadline| deadline.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_else(|| {
-                        format!("{} 23:59", Local::now().format("%Y-%m-%d"))
-                    });
-                begin_edit(app, ui, Editing::Deadline(id), &prefill);
+                let (cursor, hour, minute) = {
+                    let app = app.borrow();
+                    match app.data.get(id).and_then(|item| item.deadline.as_ref()) {
+                        Some(deadline) => {
+                            (deadline.date_naive(), deadline.hour(), deadline.minute())
+                        }
+                        None => (Local::now().date_naive(), 23, 59),
+                    }
+                };
+                begin_edit(
+                    app,
+                    ui,
+                    Editing::Deadline {
+                        id,
+                        cursor,
+                        time_focus: false,
+                    },
+                    &format!("{hour:02}:{minute:02}"),
+                );
             }
         }
         Action::MakeOrder => {
@@ -638,6 +921,9 @@ fn run_action(app: &Rc<RefCell<App>>, ui: &Rc<Ui>, action: Action) {
             }
             refresh(app, ui);
         }
+        // The `cal_*` actions are routed by `on_key` while the calendar is open
+        // and never reach this function.
+        _ => {}
     }
 }
 
@@ -714,8 +1000,11 @@ fn begin_edit(app: &Rc<RefCell<App>>, ui: &Rc<Ui>, editing: Editing, prefill: &s
     }
     ui.entry.set_text(prefill);
     refresh(app, ui);
-    ui.entry.grab_focus();
-    ui.entry.select_region(0, -1);
+    // The calendar keeps the keyboard unless the time field is asked for.
+    if !matches!(editing, Editing::Deadline { time_focus: false, .. }) {
+        ui.entry.grab_focus();
+        ui.entry.select_region(0, -1);
+    }
 }
 
 fn cancel_edit(app: &Rc<RefCell<App>>, ui: &Rc<Ui>) {
@@ -752,17 +1041,26 @@ fn submit(app: &Rc<RefCell<App>>, ui: &Rc<Ui>, text: &str) {
             }
             selected = Some(id);
         }
-        Editing::Deadline(id) => match parse_deadline(text) {
-            Some(deadline) => {
-                app.borrow_mut().data.set_deadline(id, deadline);
-                selected = Some(id);
+        Editing::Deadline { id, cursor, .. } => {
+            let deadline = parse_time(text)
+                .and_then(|(hour, minute)| cursor.and_hms_opt(hour, minute, 0))
+                .and_then(|naive| Local.from_local_datetime(&naive).single());
+            match deadline {
+                Some(deadline) => {
+                    app.borrow_mut().data.set_deadline(id, deadline);
+                    selected = Some(id);
+                }
+                None => {
+                    // Keep the editor open so the time can be corrected.
+                    let mut restored = editing;
+                    if let Editing::Deadline { time_focus, .. } = &mut restored {
+                        *time_focus = true;
+                    }
+                    app.borrow_mut().editing = Some(restored);
+                    error = Some("expected a time like `09:30`".to_string());
+                }
             }
-            None => {
-                // Keep the line open so the text can be corrected.
-                app.borrow_mut().editing = Some(Editing::Deadline(id));
-                error = Some("expected `YYYY-MM-DD HH:MM`".to_string());
-            }
-        },
+        }
     }
 
     {

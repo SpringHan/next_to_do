@@ -1,5 +1,7 @@
 # Next To Do
 
+English | [中文文档](README.zh.md)
+
 A small, always-on-top todo panel for Wayland compositors such as
 [Niri](https://github.com/YaLTeR/niri), written in Rust with GTK4 and
 `gtk4-layer-shell`. It pairs with [waybar](https://github.com/Alexays/Waybar) by

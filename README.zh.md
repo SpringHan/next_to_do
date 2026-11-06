@@ -1,5 +1,7 @@
 # Next To Do
 
+[English](README.md) | 中文文档
+
 一个运行在 Wayland 桌面环境（如 [Niri](https://github.com/YaLTeR/niri)）上的小型悬浮代办事项面板，
 使用 Rust、GTK4 与 `gtk4-layer-shell` 编写，并可为
 [waybar](https://github.com/Alexays/Waybar) 提供今日未完成事项的计数。

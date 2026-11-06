@@ -41,23 +41,23 @@ struct Item {
 
 `Kind::Order` items are order-bounded: they exist independently of the calendar
 and are positioned relative to `prev`. `Kind::Time` items are time-bounded: they
-carry a `deadline` and are shown once their local deadline day is reached.
+carry a `deadline` and belong to the day of that deadline.
 `Order` items ignore `deadline`, `Time` items ignore `prev`.
 
-Visibility rules (`Item::is_visible`):
+Visibility rules (`Item::is_visible(date)`):
 
-* order-bounded items are always visible (including completed ones, so that they
-  can be un-completed);
-* time-bounded items are visible from their deadline day onwards, so overdue
-  items stay in the list and are marked as overdue; a time-bounded item without a
-  deadline stays visible too, instead of silently disappearing.
+* order-bounded items are visible on every day (including completed ones, so that
+  they can be un-completed);
+* time-bounded items are visible on the day of their deadline only, which is what
+  lets the calendar show any day's list; a time-bounded item without a deadline
+  stays visible on every day instead of silently disappearing.
 
 Completed items are rendered dimmed and struck through but are excluded from the
-counts used by `waybar`.
+counts and from the calendar markers.
 
 ## Display order
 
-`Data::ordered(today)` builds the list of ids shown in the panel:
+`Data::ordered(date)` builds the list of ids shown in the panel for `date`:
 
 1. Collect the visible items.
 2. Take every visible order-bounded item and group it under its `prev`. Items
@@ -185,20 +185,24 @@ Widget tree:
 ```
 Window (transparent, class `next-to-do`)
 └── Box.panel (dark rounded background, 420px wide)
-    ├── Box.header   "TODAY" + date
-    ├── ScrolledWindow (max content height 460)   ┐ exactly one of the two is
-    │   └── Box.rows  one Box.row per item        │ visible: the item list
-    ├── Box.calendar                              │ normally, the calendar while
-    │   ├── Label.calendar-item  edited item      │ a deadline is being edited
-    │   ├── Label.month          "November 2026"  │
-    │   ├── Box                  Mo .. Su         │
-    │   ├── Box                  6 rows of 7      │
-    │   │   └── Button.day        one per day     │
-    │   └── Label.hint           calendar legend  ┘
+    ├── Box.header   "TODAY"/weekday + date
+    ├── Box.calendar (hidden unless it owns the keys, `.focused` while it does)
+    │   ├── Label.calendar-item  item being edited (hidden otherwise)
+    │   ├── Label.month          "November 2026"
+    │   ├── Box                  Mo .. Su
+    │   └── Box                  6 rows of 7
+    │       └── Button.day        one per day: number + dot marker
+    ├── ScrolledWindow (max content height 280)
+    │   └── Box.rows  one Box.row per item of the viewed day
     ├── Box.input-bar (hidden unless editing): ">" + Entry (title or HH:MM)
     ├── Label.status  inline error, e.g. a malformed time
-    └── Box.footer    open/total counter + key legend
+    └── Box.footer    open/total counter + contextual key legend
 ```
+
+A day button holds two labels: the day number and a `•` marker that is shown when
+that day still has unfinished time-bounded items. The marker keeps the cells the
+same height, and the selected day turns it dark so it stays visible on the green
+highlight.
 
 The theme is a single CSS string installed for the default display at
 `STYLE_PROVIDER_PRIORITY_APPLICATION`: near-black panel (`rgba(20,20,20,0.97)`),
@@ -209,17 +213,26 @@ highlighted day drawn as a green rounded square with dark text.
 
 ## Interaction
 
-There are three modes:
+The panel has two panes, the calendar and the item list. The calendar is hidden by
+default: `Tab` (the `cal_time` action) opens it and moves the keyboard to it, and
+`Tab`, `Enter` or `Escape` hand the keyboard back and hide it again. While it is
+open it gets a green outline. Each pane only reacts to its own key family, so
+`j`/`k` mean "next/previous item" in the list and "next/previous week" in the
+calendar without colliding.
 
-* **normal** — keys are matched against the normal bindings; the selected row is
-  highlighted.
-* **calendar** — opened with the deadline key. The item list is replaced by a
-  month grid for the selected item. The highlighted day is the state; the shown
-  month always follows it, so moving the highlight across a month boundary also
-  scrolls the grid.
+* **list** — the normal bindings, as before. `t` turns the selected item into a
+  time-bounded one on the day the calendar shows.
+* **calendar** — the `cal_*` bindings. The highlighted day is `view_date`; the
+  list below always shows that day's items, so moving in the calendar is how other
+  days are browsed. `Enter` or `Tab` goes back to the list, `Escape` also goes back
+  (one more `Escape` hides the panel).
 * **text** — the entry line is open for a new title, a rename, or the `HH:MM`
-  time of the highlighted calendar day. `Enter` submits, `Escape` cancels. While
-  the entry is open every key except `Escape` is forwarded to it.
+  time of a deadline. `Enter` submits, `Escape` cancels. While the entry is open
+  every key except `Escape` is forwarded to it.
+
+While a deadline is being edited the calendar is still the focused pane, so the
+day can be changed before the time is confirmed; `Tab` moves between the calendar
+and the `HH:MM` entry, `Enter` saves and `Escape` cancels.
 
 The calendar keys (all configurable under `cal_*`):
 
@@ -232,9 +245,8 @@ The calendar keys (all configurable under `cal_*`):
 | `[` / `Page_Up`   | previous month (same day when it exists) |
 | `]` / `Page_Down` | next month                               |
 | `t`               | jump to today                            |
-| `Tab`             | move the keyboard to the `HH:MM` entry   |
-| `Enter`           | save                                     |
-| `Escape`          | cancel                                   |
+| `Enter` / `Tab`   | back to the list                         |
+| `Escape`          | back to the list                         |
 
 The `HH:MM` entry starts with the item's current deadline time, or with `23:59`
 for an item that has no deadline yet.
@@ -248,11 +260,12 @@ Mouse and keyboard are equivalent:
 | click a calendar day   | `h`/`j`/`k`/`l`, arrows   |
 
 The key controller is attached to the window in the *capture* phase, so it sees
-events before the focused widget and decides which mode owns the key. `Escape`
-still cancels while the calendar is open even if `cal_cancel` was unbound.
+events before the focused widget and decides which pane or editing mode owns the
+key. `Escape` still cancels while editing even if `cal_cancel` was unbound, and
+`q`/`Escape` keep quitting and hiding from the calendar pane.
 
-Setting a deadline turns the item into a time-bounded one; `make_order` turns it
-back and appends it at the end of the order-bounded chain.
+Setting a deadline turns the item into a time-bounded one on the viewed day;
+`make_order` turns it back and appends it at the end of the order-bounded chain.
 
 ## Waybar integration
 

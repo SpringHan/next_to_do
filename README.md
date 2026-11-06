@@ -12,6 +12,8 @@ printing today's unfinished item counts.
 - Centred, rounded, always-on-top panel (layer-shell `overlay`)
 - Order-bounded items (positioned after a predecessor) and time-bounded items
   (positioned by a deadline)
+- A built-in month calendar to browse any day; days that still have open items
+  carry a dot
 - TUI-style single-key controls, every binding configurable
 - Mouse and keyboard cover the same actions
 - `next_to_do waybar` prints `order-bounded:time-bounded` for today
@@ -41,9 +43,14 @@ next_to_do help     # usage and file locations
 ```
 
 The panel is created once and kept alive; running `next_to_do` again toggles it.
-`Escape` hides it, `q` quits.
+`q` quits; `Escape` leaves the calendar (and hides the panel from the list).
 
 ### Keys
+
+The panel has two panes: the calendar on top and the item list below. The calendar
+is hidden by default; `Tab` opens it and moves the keyboard to it (green outline),
+and `Tab`, `Enter` or `Escape` close it again. Each pane only reacts to its own
+keys, so `j`/`k` mean "next item" in the list and "next week" in the calendar.
 
 | Key        | Action                                         |
 | ---------- | ---------------------------------------------- |
@@ -52,21 +59,23 @@ The panel is created once and kept alive; running `next_to_do` again toggles it.
 | `space`    | toggle selected item done / not done           |
 | `a`        | add an order-bounded item                      |
 | `e`        | rename the selected item                       |
-| `t`        | open the deadline calendar (time-bounded)      |
+| `t`        | set the deadline on the viewed day (time-bound)|
 | `o`        | drop the deadline (back to order-bounded)      |
 | `d`        | delete the selected item                       |
 | `Ctrl+j`   | move the selected item down                    |
 | `Ctrl+k`   | move the selected item up                      |
 | `Ctrl+r`   | reload `items.json` from disk                  |
+| `Tab`      | switch to the calendar                         |
 | `Escape`   | hide the panel                                 |
 | `q`        | quit                                           |
 
 Clicking a row selects it, clicking its `○` marks it done.
 
-### Deadline calendar
+### Calendar
 
-`t` opens a month calendar for the selected item; the list is replaced by the
-grid and the highlighted day is what gets saved.
+`Tab` opens the calendar; it always shows the day whose items are listed, so
+another day's items are reached by moving the highlighted day. Days that still
+have unfinished time-bounded items show a dot.
 
 | Key               | Action                                   |
 | ----------------- | ---------------------------------------- |
@@ -77,11 +86,12 @@ grid and the highlighted day is what gets saved.
 | `[` / `Page_Up`   | previous month (same day when it exists) |
 | `]` / `Page_Down` | next month                               |
 | `t`               | jump to today                            |
-| `Tab`             | edit the time (`HH:MM`) instead          |
-| `Enter`           | save the day and time                    |
-| `Escape`          | cancel                                   |
+| `Enter` / `Tab`   | close the calendar                        |
+| `Escape`          | close the calendar                        |
 
-Days can be clicked as well: on the calendar every mouse action has a key.
+`t` on an item keeps the day the calendar shows: the deadline edit only asks for
+the time (`HH:MM`) and the calendar stays navigable, so the day can still be
+changed before `Enter` confirms. Days can be clicked as well.
 
 All of these keys can be changed in `~/.config/next_to_do/config.json`, e.g.
 

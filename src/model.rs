@@ -32,26 +32,20 @@ pub struct Item {
 }
 
 impl Item {
-    /// True when the item belongs to the list of `today`.
-    pub fn is_visible(&self, today: NaiveDate) -> bool {
+    /// True when the item belongs to the list of `date`.
+    ///
+    /// Order-bounded items belong to every day; time-bounded items belong to the
+    /// day of their deadline. A time-bounded item without a deadline is kept
+    /// visible instead of disappearing from every day.
+    pub fn is_visible(&self, date: NaiveDate) -> bool {
         match self.kind {
             Kind::Order => true,
-            // A time-bounded item without a deadline is kept visible instead of
-            // disappearing until a deadline is set.
             Kind::Time => self
                 .deadline
                 .as_ref()
-                .map(|deadline| deadline.date_naive() <= today)
+                .map(|deadline| deadline.date_naive() == date)
                 .unwrap_or(true),
         }
-    }
-
-    /// True when the deadline day has already passed.
-    pub fn is_overdue(&self, today: NaiveDate) -> bool {
-        self.deadline
-            .as_ref()
-            .map(|deadline| deadline.date_naive() < today)
-            .unwrap_or(false)
     }
 }
 
@@ -201,16 +195,16 @@ impl Data {
         }
     }
 
-    /// Ids of today's items, in display order.
+    /// Ids of the items shown for `date`, in display order.
     ///
     /// Order-bounded chains without a visible predecessor come first, then the
-    /// time-bounded items sorted by deadline. An order-bounded item whose
-    /// predecessor is a time-bounded item follows that item instead.
-    pub fn ordered(&self, today: NaiveDate) -> Vec<u64> {
+    /// time-bounded items of that day sorted by deadline. An order-bounded item
+    /// whose predecessor is a time-bounded item follows that item instead.
+    pub fn ordered(&self, date: NaiveDate) -> Vec<u64> {
         let visible: Vec<&Item> = self
             .items
             .iter()
-            .filter(|item| item.is_visible(today))
+            .filter(|item| item.is_visible(date))
             .collect();
         let visible_ids: HashSet<u64> = visible.iter().map(|item| item.id).collect();
 
@@ -248,14 +242,14 @@ impl Data {
         ordered
     }
 
-    /// `(order-bounded, time-bounded)` counts of today's unfinished items.
-    pub fn counts(&self, today: NaiveDate) -> (usize, usize) {
+    /// `(order-bounded, time-bounded)` counts of the unfinished items of `date`.
+    pub fn counts(&self, date: NaiveDate) -> (usize, usize) {
         let mut order = 0;
         let mut time = 0;
         for item in self
             .items
             .iter()
-            .filter(|item| !item.done && item.is_visible(today))
+            .filter(|item| !item.done && item.is_visible(date))
         {
             match item.kind {
                 Kind::Order => order += 1,

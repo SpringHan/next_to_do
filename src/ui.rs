@@ -1,6 +1,7 @@
 //! The layer-shell window: theme, widget tree, keyboard and mouse handling.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use chrono::{DateTime, Datelike, Days, Local, NaiveDate, TimeZone, Timelike};
@@ -98,10 +99,6 @@ window.next-to-do {
     font-size: 12px;
 }
 
-.row.overdue .meta {
-    color: #e06c75;
-}
-
 .row.done .meta {
     color: #555555;
 }
@@ -153,7 +150,15 @@ window.next-to-do {
 }
 
 .calendar {
-    margin-top: 4px;
+    margin-top: 2px;
+    margin-bottom: 8px;
+    padding: 4px;
+    border: 1px solid transparent;
+    border-radius: 14px;
+}
+
+.calendar.focused {
+    border-color: rgba(166, 227, 161, 0.35);
 }
 
 .calendar-item {
@@ -163,17 +168,17 @@ window.next-to-do {
 
 .month {
     color: #ffffff;
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 700;
     margin-top: 2px;
-    margin-bottom: 6px;
+    margin-bottom: 4px;
 }
 
 .weekday {
     color: #a6e3a1;
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 700;
-    padding: 4px 0;
+    padding: 2px 0;
 }
 
 .day {
@@ -181,11 +186,28 @@ window.next-to-do {
     background-image: none;
     border: none;
     box-shadow: none;
-    padding: 2px 0;
-    min-height: 28px;
+    padding: 1px 0;
+    min-height: 26px;
     border-radius: 8px;
     color: #eaeaea;
-    font-size: 13px;
+}
+
+.day-number {
+    font-size: 12px;
+}
+
+.dot {
+    color: #a6e3a1;
+    font-size: 8px;
+    min-height: 8px;
+}
+
+.day.other .dot {
+    color: #3f5a3f;
+}
+
+.day.selected .dot {
+    color: #141414;
 }
 
 .day:hover {
@@ -208,18 +230,20 @@ window.next-to-do {
 }
 "#;
 
+/// Which pane owns the keys while nothing is being edited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    List,
+    Calendar,
+}
+
 /// What the entry line or the calendar is currently editing.
 #[derive(Debug, Clone, Copy)]
 enum Editing {
     NewItem,
     Title(u64),
-    Deadline {
-        id: u64,
-        /// Highlighted day of the calendar.
-        cursor: NaiveDate,
-        /// True while the `HH:MM` entry owns the keyboard.
-        time_focus: bool,
-    },
+    /// The deadline day comes from the calendar, the entry only holds `HH:MM`.
+    Deadline { id: u64, time_focus: bool },
 }
 
 impl Editing {
@@ -227,15 +251,19 @@ impl Editing {
         match self {
             Editing::NewItem => "new item, Enter to save, Escape to cancel",
             Editing::Title(_) => "new title, Enter to save, Escape to cancel",
-            Editing::Deadline { .. } => "time `HH:MM`, Tab to go back to the calendar",
+            Editing::Deadline { .. } => "time `HH:MM`, Tab to adjust the date",
         }
     }
 }
 
 struct App {
     data: Data,
+    config: config::Config,
     bindings: Vec<Binding>,
     selected: Option<u64>,
+    /// Day whose items are listed and highlighted in the calendar.
+    view_date: NaiveDate,
+    focus: Focus,
     editing: Option<Editing>,
     status: Option<String>,
 }
@@ -249,13 +277,14 @@ impl App {
 struct Ui {
     window: gtk::Window,
     rows: gtk::Box,
-    scroller: gtk::ScrolledWindow,
     calendar: gtk::Box,
     calendar_item: gtk::Label,
     month_label: gtk::Label,
     calendar_days: gtk::Box,
+    header_heading: gtk::Label,
     header_date: gtk::Label,
     footer_count: gtk::Label,
+    hint: gtk::Label,
     input_bar: gtk::Box,
     entry: gtk::Entry,
     status: gtk::Label,
@@ -267,7 +296,6 @@ struct Row {
     title: String,
     meta: String,
     done: bool,
-    overdue: bool,
     selected: bool,
 }
 
@@ -304,11 +332,14 @@ fn build(application: &gtk::Application) {
     let data = Data::load(&config::data_path());
     let bindings = config.bindings();
 
-    let ui = Rc::new(build_ui(application, &config));
+    let ui = Rc::new(build_ui(application));
     let app = Rc::new(RefCell::new(App {
         data,
+        config,
         bindings,
         selected: None,
+        view_date: Local::now().date_naive(),
+        focus: Focus::List,
         editing: None,
         status: None,
     }));
@@ -329,7 +360,7 @@ fn build(application: &gtk::Application) {
     ui.window.present();
 }
 
-fn build_ui(application: &gtk::Application, config: &config::Config) -> Ui {
+fn build_ui(application: &gtk::Application) -> Ui {
     let window = gtk::Window::builder()
         .application(application)
         .title("Next To Do")
@@ -367,7 +398,7 @@ fn build_ui(application: &gtk::Application, config: &config::Config) -> Ui {
     let scroller = gtk::ScrolledWindow::new();
     scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     scroller.set_propagate_natural_height(true);
-    scroller.set_max_content_height(460);
+    scroller.set_max_content_height(280);
     scroller.set_child(Some(&rows));
 
     let calendar = gtk::Box::new(gtk::Orientation::Vertical, 2);
@@ -387,16 +418,10 @@ fn build_ui(application: &gtk::Application, config: &config::Config) -> Ui {
         weekdays.append(&weekday);
     }
     let calendar_days = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    let calendar_hint = gtk::Label::new(Some(hint_text(config, CALENDAR_HINTS).as_str()));
-    calendar_hint.add_css_class("hint");
-    calendar_hint.set_wrap(true);
-    calendar_hint.set_max_width_chars(46);
-    calendar_hint.set_justify(gtk::Justification::Center);
     calendar.append(&calendar_item);
     calendar.append(&month_label);
     calendar.append(&weekdays);
     calendar.append(&calendar_days);
-    calendar.append(&calendar_hint);
 
     let input_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     input_bar.add_css_class("input-bar");
@@ -420,7 +445,7 @@ fn build_ui(application: &gtk::Application, config: &config::Config) -> Ui {
     footer_count.add_css_class("count");
     footer_count.set_xalign(0.0);
     footer_count.set_hexpand(true);
-    let hint = gtk::Label::new(Some(hint_text(config, MAIN_HINTS).as_str()));
+    let hint = gtk::Label::new(None);
     hint.add_css_class("hint");
     hint.set_xalign(1.0);
     hint.set_wrap(true);
@@ -430,8 +455,8 @@ fn build_ui(application: &gtk::Application, config: &config::Config) -> Ui {
     footer.append(&hint);
 
     panel.append(&header);
-    panel.append(&scroller);
     panel.append(&calendar);
+    panel.append(&scroller);
     panel.append(&input_bar);
     panel.append(&status);
     panel.append(&footer);
@@ -440,13 +465,14 @@ fn build_ui(application: &gtk::Application, config: &config::Config) -> Ui {
     Ui {
         window,
         rows,
-        scroller,
         calendar,
         calendar_item,
         month_label,
         calendar_days,
+        header_heading: heading,
         header_date,
         footer_count,
+        hint,
         input_bar,
         entry,
         status,
@@ -460,6 +486,7 @@ const MAIN_HINTS: &[(&str, Action)] = &[
     ("edit", Action::EditTitle),
     ("time", Action::SetDeadline),
     ("delete", Action::Delete),
+    ("calendar", Action::CalTime),
     ("quit", Action::Quit),
 ];
 
@@ -468,7 +495,11 @@ const CALENDAR_HINTS: &[(&str, Action)] = &[
     ("week", Action::CalDown),
     ("month", Action::CalNextMonth),
     ("today", Action::CalToday),
-    ("time", Action::CalTime),
+    ("list", Action::CalTime),
+    ("hide", Action::CalCancel),
+];
+
+const TIME_HINTS: &[(&str, Action)] = &[
     ("save", Action::CalConfirm),
     ("cancel", Action::CalCancel),
 ];
@@ -506,14 +537,16 @@ fn install_css() {
 fn refresh(app: &Rc<RefCell<App>>, ui: &Rc<Ui>) {
     let today = Local::now().date_naive();
 
-    let (rows, footer, date, editing, status, calendar_title) = {
+    let (rows, footer, hint, editing, status, calendar_title, view_date, focus, marked) = {
         let mut app = app.borrow_mut();
-        let order = app.data.ordered(today);
+        let view_date = app.view_date;
+        let order = app.data.ordered(view_date);
         if app.selected.map_or(true, |id| !order.contains(&id)) {
             app.selected = order.first().copied();
         }
         let selected = app.selected;
         let editing = app.editing;
+        let focus = app.focus;
 
         // A plain loop: closures returning references into the borrowed state
         // would not compile.
@@ -523,32 +556,57 @@ fn refresh(app: &Rc<RefCell<App>>, ui: &Rc<Ui>) {
                 rows.push(Row {
                     id: item.id,
                     title: item.title.clone(),
-                    meta: meta_text(item.deadline.as_ref(), today),
+                    meta: meta_text(item.deadline.as_ref()),
                     done: item.done,
-                    overdue: item.is_overdue(today),
                     selected: selected == Some(item.id),
                 });
             }
         }
 
-        let (open_order, open_time) = app.data.counts(today);
+        let (open_order, open_time) = app.data.counts(view_date);
         let footer = format!(
-            "{} open  ·  {} today",
+            "{} open  ·  {} items",
             open_order + open_time,
             order.len()
         );
-        let date = Local::now().format("%a %d %b").to_string().to_uppercase();
         let calendar_title = match editing {
             Some(Editing::Deadline { id, .. }) => app.data.get(id).map(|item| item.title.clone()),
             _ => None,
         };
+
+        // Days that still have unfinished time-bounded items get a marker.
+        let marked: HashSet<NaiveDate> = app
+            .data
+            .items
+            .iter()
+            .filter(|item| item.kind == Kind::Time && !item.done)
+            .filter_map(|item| {
+                item.deadline
+                    .as_ref()
+                    .map(|deadline| deadline.date_naive())
+            })
+            .collect();
+
+        let hints = match editing {
+            Some(Editing::Deadline {
+                time_focus: false, ..
+            }) => CALENDAR_HINTS,
+            Some(_) => TIME_HINTS,
+            None if focus == Focus::Calendar => CALENDAR_HINTS,
+            None => MAIN_HINTS,
+        };
+        let hint = hint_text(&app.config, hints);
+
         (
             rows,
             footer,
-            date,
+            hint,
             editing,
             app.status.clone(),
             calendar_title,
+            view_date,
+            focus,
+            marked,
         )
     };
 
@@ -556,7 +614,7 @@ fn refresh(app: &Rc<RefCell<App>>, ui: &Rc<Ui>) {
         ui.rows.remove(&child);
     }
     if rows.is_empty() {
-        let empty = gtk::Label::new(Some("nothing left for today"));
+        let empty = gtk::Label::new(Some("nothing on this day"));
         empty.add_css_class("empty");
         empty.set_margin_top(14);
         empty.set_margin_bottom(14);
@@ -567,25 +625,55 @@ fn refresh(app: &Rc<RefCell<App>>, ui: &Rc<Ui>) {
         }
     }
 
-    let calendar_open = matches!(editing, Some(Editing::Deadline { .. }));
-    ui.scroller.set_visible(!calendar_open);
+    // The calendar is only on screen while it owns the keys, or while a deadline
+    // is being edited on it.
+    let calendar_open =
+        matches!(editing, Some(Editing::Deadline { .. })) || focus == Focus::Calendar;
     ui.calendar.set_visible(calendar_open);
-    if let Some(Editing::Deadline { cursor, .. }) = editing {
+    if calendar_open {
+        let calendar_focused = match editing {
+            Some(Editing::Deadline {
+                time_focus: false, ..
+            }) => true,
+            Some(_) => false,
+            None => focus == Focus::Calendar,
+        };
+        if calendar_focused {
+            ui.calendar.add_css_class("focused");
+        } else {
+            ui.calendar.remove_css_class("focused");
+        }
+
+        ui.calendar_item.set_visible(calendar_title.is_some());
         ui.calendar_item
             .set_text(calendar_title.as_deref().unwrap_or_default());
-        ui.month_label.set_text(&cursor.format("%B %Y").to_string());
-        build_calendar_days(app, ui, cursor, today);
+        ui.month_label.set_text(&view_date.format("%B %Y").to_string());
+        build_calendar_days(app, ui, view_date, today, &marked);
     }
 
-    ui.header_date.set_text(&date);
+    let heading = if view_date == today {
+        "TODAY".to_string()
+    } else {
+        view_date.format("%A").to_string().to_uppercase()
+    };
+    ui.header_heading.set_text(&heading);
+    ui.header_date
+        .set_text(&view_date.format("%d %b").to_string().to_uppercase());
     ui.footer_count.set_text(&footer);
+    ui.hint.set_text(&hint);
     ui.status.set_text(status.as_deref().unwrap_or_default());
     ui.status.set_visible(status.is_some());
     ui.input_bar.set_visible(editing.is_some());
     match editing {
         Some(editing) => {
             ui.entry.set_placeholder_text(Some(editing.placeholder()));
-            if !matches!(editing, Editing::Deadline { time_focus: false, .. }) {
+            if !matches!(
+                editing,
+                Editing::Deadline {
+                    time_focus: false,
+                    ..
+                }
+            ) {
                 ui.entry.grab_focus();
             }
         }
@@ -599,12 +687,14 @@ fn month_start(date: NaiveDate) -> NaiveDate {
 }
 
 /// Fill the calendar grid with six weeks starting on the Monday of the week of
-/// the first day of the month.
+/// the first day of the month. `marked` holds the days that still have
+/// unfinished time-bounded items.
 fn build_calendar_days(
     app: &Rc<RefCell<App>>,
     ui: &Rc<Ui>,
     cursor: NaiveDate,
     today: NaiveDate,
+    marked: &HashSet<NaiveDate>,
 ) {
     while let Some(child) = ui.calendar_days.first_child() {
         ui.calendar_days.remove(&child);
@@ -621,7 +711,16 @@ fn build_calendar_days(
             let date = start
                 .checked_add_days(Days::new(week * 7 + weekday))
                 .unwrap_or(start);
-            let button = gtk::Button::with_label(&date.day().to_string());
+            let cell = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            let number = gtk::Label::new(Some(&date.day().to_string()));
+            number.add_css_class("day-number");
+            let dot = gtk::Label::new(Some(if marked.contains(&date) { "•" } else { "" }));
+            dot.add_css_class("dot");
+            cell.append(&number);
+            cell.append(&dot);
+
+            let button = gtk::Button::new();
+            button.set_child(Some(&cell));
             button.add_css_class("day");
             if date.month() != cursor.month() {
                 button.add_css_class("other");
@@ -634,13 +733,7 @@ fn build_calendar_days(
             }
             let (app, ui) = (app.clone(), ui.clone());
             button.connect_clicked(move |_| {
-                if let Some(Editing::Deadline {
-                    cursor, time_focus, ..
-                }) = app.borrow_mut().editing.as_mut()
-                {
-                    *cursor = date;
-                    *time_focus = false;
-                }
+                app.borrow_mut().view_date = date;
                 defer_refresh(&app, &ui);
             });
             row.append(&button);
@@ -657,9 +750,6 @@ fn make_row(app: &Rc<RefCell<App>>, ui: &Rc<Ui>, row: Row) -> gtk::Box {
     }
     if row.done {
         container.add_css_class("done");
-    }
-    if row.overdue {
-        container.add_css_class("overdue");
     }
 
     let check = gtk::Button::with_label(if row.done { "●" } else { "○" });
@@ -713,16 +803,10 @@ fn defer_refresh(app: &Rc<RefCell<App>>, ui: &Rc<Ui>) {
     gtk::glib::idle_add_local_once(move || refresh(&app, &ui));
 }
 
-fn meta_text(deadline: Option<&DateTime<Local>>, today: NaiveDate) -> String {
-    match deadline {
-        None => String::new(),
-        Some(deadline) if deadline.date_naive() == today => deadline.format("%H:%M").to_string(),
-        Some(deadline) => format!(
-            "{} {}",
-            deadline.format("%d %b"),
-            deadline.format("%H:%M")
-        ),
-    }
+fn meta_text(deadline: Option<&DateTime<Local>>) -> String {
+    deadline
+        .map(|deadline| deadline.format("%H:%M").to_string())
+        .unwrap_or_default()
 }
 
 /// Parse the `HH:MM` time typed into the deadline entry.
@@ -755,9 +839,16 @@ fn on_key(
 ) -> gtk::glib::Propagation {
     let editing = app.borrow().editing;
 
-    // The calendar owns every key while it is open.
+    // While a deadline is being edited the calendar keeps the keyboard, so the
+    // day can be adjusted before the time is confirmed.
     if matches!(editing, Some(Editing::Deadline { time_focus: false, .. })) {
         match find_action(app, key, state, true) {
+            Some(Action::CalCancel) => cancel_edit(app, ui),
+            Some(Action::CalConfirm) => {
+                let text = ui.entry.text().to_string();
+                submit(app, ui, &text);
+            }
+            Some(Action::CalTime) => focus_entry(app, ui, true),
             Some(action) => calendar_action(app, ui, action),
             None if key == gtk::gdk::Key::Escape => cancel_edit(app, ui),
             None => {}
@@ -765,7 +856,7 @@ fn on_key(
         return gtk::glib::Propagation::Stop;
     }
 
-    // Text entry: Escape cancels, the time key hands the keyboard back.
+    // Text entry: Escape cancels, the calendar key hands the keyboard back.
     if editing.is_some() {
         if key == gtk::gdk::Key::Escape {
             cancel_edit(app, ui);
@@ -774,13 +865,27 @@ fn on_key(
         if matches!(editing, Some(Editing::Deadline { time_focus: true, .. }))
             && find_action(app, key, state, true) == Some(Action::CalTime)
         {
-            if let Some(Editing::Deadline { time_focus, .. }) = app.borrow_mut().editing.as_mut() {
-                *time_focus = false;
-            }
-            refresh(app, ui);
+            focus_entry(app, ui, false);
             return gtk::glib::Propagation::Stop;
         }
         return gtk::glib::Propagation::Proceed;
+    }
+
+    // Nothing is being edited: the focused pane decides what a key means.
+    if app.borrow().focus == Focus::Calendar {
+        match find_action(app, key, state, true) {
+            Some(Action::CalConfirm | Action::CalCancel | Action::CalTime) => {
+                set_focus(app, ui, Focus::List)
+            }
+            Some(action) => calendar_action(app, ui, action),
+            // Quitting and hiding stay available from every pane.
+            None => match find_action(app, key, state, false) {
+                Some(action @ (Action::Quit | Action::Hide)) => run_action(app, ui, action),
+                _ if key == gtk::gdk::Key::Escape => set_focus(app, ui, Focus::List),
+                _ => {}
+            },
+        }
+        return gtk::glib::Propagation::Stop;
     }
 
     match find_action(app, key, state, false) {
@@ -788,63 +893,60 @@ fn on_key(
             run_action(app, ui, action);
             gtk::glib::Propagation::Stop
         }
-        None => gtk::glib::Propagation::Proceed,
+        None => {
+            if find_action(app, key, state, true) == Some(Action::CalTime) {
+                set_focus(app, ui, Focus::Calendar);
+                gtk::glib::Propagation::Stop
+            } else {
+                gtk::glib::Propagation::Proceed
+            }
+        }
     }
 }
 
-/// Apply a key press while the deadline calendar is focused.
-fn calendar_action(app: &Rc<RefCell<App>>, ui: &Rc<Ui>, action: Action) {
-    if action == Action::CalCancel {
-        cancel_edit(app, ui);
-        return;
-    }
-    if action == Action::CalConfirm {
-        let text = ui.entry.text().to_string();
-        submit(app, ui, &text);
-        return;
-    }
+fn set_focus(app: &Rc<RefCell<App>>, ui: &Rc<Ui>, focus: Focus) {
+    app.borrow_mut().focus = focus;
+    refresh(app, ui);
+}
 
+/// Give the `HH:MM` entry the keyboard, or hand it back to the calendar.
+fn focus_entry(app: &Rc<RefCell<App>>, ui: &Rc<Ui>, entry: bool) {
+    if let Some(Editing::Deadline { time_focus, .. }) = app.borrow_mut().editing.as_mut() {
+        *time_focus = entry;
+    }
+    refresh(app, ui);
+}
+
+/// Move the viewed day by one of the `cal_*` movement actions.
+fn calendar_action(app: &Rc<RefCell<App>>, ui: &Rc<Ui>, action: Action) {
     let today = Local::now().date_naive();
     {
         let mut app = app.borrow_mut();
-        let Some(Editing::Deadline {
-            cursor, time_focus, ..
-        }) = app.editing.as_mut()
-        else {
-            return;
+        let date = app.view_date;
+        let moved = match action {
+            Action::CalLeft => date.checked_sub_days(Days::new(1)),
+            Action::CalRight => date.checked_add_days(Days::new(1)),
+            Action::CalUp => date.checked_sub_days(Days::new(7)),
+            Action::CalDown => date.checked_add_days(Days::new(7)),
+            Action::CalPrevMonth => shift_month(date, -1),
+            Action::CalNextMonth => shift_month(date, 1),
+            Action::CalToday => Some(today),
+            _ => None,
         };
-        *time_focus = action == Action::CalTime;
-        match action {
-            Action::CalLeft | Action::CalRight | Action::CalUp | Action::CalDown => {
-                let days: i64 = match action {
-                    Action::CalLeft => -1,
-                    Action::CalRight => 1,
-                    Action::CalUp => -7,
-                    _ => 7,
-                };
-                *cursor = if days < 0 {
-                    cursor
-                        .checked_sub_days(Days::new((-days) as u64))
-                        .unwrap_or(*cursor)
-                } else {
-                    cursor
-                        .checked_add_days(Days::new(days as u64))
-                        .unwrap_or(*cursor)
-                };
-            }
-            Action::CalPrevMonth | Action::CalNextMonth => {
-                let step = if action == Action::CalPrevMonth { -1 } else { 1 };
-                let index = cursor.year() * 12 + cursor.month0() as i32 + step;
-                let year = index.div_euclid(12);
-                let month = index.rem_euclid(12) as u32 + 1;
-                let first = NaiveDate::from_ymd_opt(year, month, 1).unwrap_or(*cursor);
-                *cursor = NaiveDate::from_ymd_opt(year, month, cursor.day()).unwrap_or(first);
-            }
-            Action::CalToday => *cursor = today,
-            _ => {}
+        if let Some(moved) = moved {
+            app.view_date = moved;
         }
     }
     refresh(app, ui);
+}
+
+/// The same day in the neighbouring month, falling back to its first day.
+fn shift_month(date: NaiveDate, delta: i32) -> Option<NaiveDate> {
+    let index = date.year() * 12 + date.month0() as i32 + delta;
+    let year = index.div_euclid(12);
+    let month = index.rem_euclid(12) as u32 + 1;
+    NaiveDate::from_ymd_opt(year, month, date.day())
+        .or_else(|| NaiveDate::from_ymd_opt(year, month, 1))
 }
 
 fn run_action(app: &Rc<RefCell<App>>, ui: &Rc<Ui>, action: Action) {
@@ -879,13 +981,11 @@ fn run_action(app: &Rc<RefCell<App>>, ui: &Rc<Ui>, action: Action) {
         Action::SetDeadline => {
             let selected = app.borrow().selected;
             if let Some(id) = selected {
-                let (cursor, hour, minute) = {
+                let (hour, minute) = {
                     let app = app.borrow();
                     match app.data.get(id).and_then(|item| item.deadline.as_ref()) {
-                        Some(deadline) => {
-                            (deadline.date_naive(), deadline.hour(), deadline.minute())
-                        }
-                        None => (Local::now().date_naive(), 23, 59),
+                        Some(deadline) => (deadline.hour(), deadline.minute()),
+                        None => (23, 59),
                     }
                 };
                 begin_edit(
@@ -893,7 +993,6 @@ fn run_action(app: &Rc<RefCell<App>>, ui: &Rc<Ui>, action: Action) {
                     ui,
                     Editing::Deadline {
                         id,
-                        cursor,
                         time_focus: false,
                     },
                     &format!("{hour:02}:{minute:02}"),
@@ -1021,6 +1120,7 @@ fn submit(app: &Rc<RefCell<App>>, ui: &Rc<Ui>, text: &str) {
     let Some(editing) = editing else {
         return;
     };
+    let view_date = app.borrow().view_date;
 
     let mut selected = None;
     let mut error = None;
@@ -1041,9 +1141,9 @@ fn submit(app: &Rc<RefCell<App>>, ui: &Rc<Ui>, text: &str) {
             }
             selected = Some(id);
         }
-        Editing::Deadline { id, cursor, .. } => {
+        Editing::Deadline { id, .. } => {
             let deadline = parse_time(text)
-                .and_then(|(hour, minute)| cursor.and_hms_opt(hour, minute, 0))
+                .and_then(|(hour, minute)| view_date.and_hms_opt(hour, minute, 0))
                 .and_then(|naive| Local.from_local_datetime(&naive).single());
             match deadline {
                 Some(deadline) => {
